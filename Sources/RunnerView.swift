@@ -2,6 +2,7 @@ import SwiftUI
 import CoreML
 import PhotosUI
 import AVFoundation
+import UniformTypeIdentifiers
 
 enum Compute: String, CaseIterable, Identifiable {
     case all = "All", ne = "Neural Engine", gpu = "GPU", cpu = "CPU"
@@ -273,10 +274,9 @@ struct RunnerView: View {
 
     private func runVideo(fps: Double) async {
         guard let m = mlModel, let (videoKey, url) = videos.first else { return }
-        busy = true; errorText = ""; output = ""; outImage = nil
-        defer { busy = false }
-
-        do {
+busy = true; errorText = ""; output = ""; outImage = nil
+defer { busy = false }
+do {
 let asset = AVURLAsset(url: url)
 let duration = try await asset.load(.duration)
 let totalSeconds = CMTimeGetSeconds(duration)
