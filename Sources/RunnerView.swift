@@ -3,6 +3,7 @@ import CoreML
 import PhotosUI
 import AVFoundation
 import UniformTypeIdentifiers
+import CoreTransferable
 
 enum Compute: String, CaseIterable, Identifiable {
     case all = "All", ne = "Neural Engine", gpu = "GPU", cpu = "CPU"
@@ -97,7 +98,7 @@ struct MediaInputRow: View {
 
                     Slider(value: $currentTime, in: 0...videoDuration)
                         .onChange(of: currentTime) { _, newTime in
-                            extractFrame(at: newTime)
+                            Task { await extractFrame(at: newTime) }
                         }
                 }
             }
@@ -122,7 +123,7 @@ struct MediaInputRow: View {
             gen.requestedTimeToleranceAfter = .zero
             generator = gen
             currentTime = 0
-            extractFrame(at: 0)
+            await extractFrame(at: 0)
             return
         }
 
@@ -135,19 +136,15 @@ struct MediaInputRow: View {
         }
     }
 
-    private func extractFrame(at seconds: Double) {
+    @MainActor
+    private func extractFrame(at seconds: Double) async {
         guard let generator else { return }
         let cmTime = CMTime(seconds: seconds, preferredTimescale: 600)
-        generator.generateCGImageAsynchronously(for: cmTime) { cgImage, _, _ in
-            if let cgImage {
-                Task { @MainActor in
-                    self.image = UIImage(cgImage: cgImage)
-                }
-            }
+        if let (cgImage, _) = try? await generator.image(at: cmTime) {
+            self.image = UIImage(cgImage: cgImage)
         }
     }
 }
-
 struct RunnerView: View {
     let model: StoredModel
     @State private var compute: Compute = .all
@@ -274,91 +271,98 @@ struct RunnerView: View {
 
     private func runVideo(fps: Double) async {
         guard let m = mlModel, let (videoKey, url) = videos.first else { return }
-busy = true; errorText = ""; output = ""; outImage = nil
-defer { busy = false }
-do {
-let asset = AVURLAsset(url: url)
-let duration = try await asset.load(.duration)
-let totalSeconds = CMTimeGetSeconds(duration)
-let step = 1.0 / fps
-let generator = AVAssetImageGenerator(asset: asset)
-generator.appliesPreferredTrackTransform = true
-generator.requestedTimeToleranceBefore = .zero
-generator.requestedTimeToleranceAfter = .zero
-var t: Double = 0
-while t <= totalSeconds {
-if Task.isCancelled { break }
-let cmTime = CMTime(seconds: t, preferredTimescale: 600)
-if let (cgImage, _) = try? await generator.image(at: cmTime) {
-let frameUI = UIImage(cgImage: cgImage)
-images[videoKey] = frameUI
-var frameInputs = images
-frameInputs[videoKey] = frameUI
-try await predictFrame(
-using: m,
-overrideImages: frameInputs,
-header: String(format: "Timestamp: %.2fs / %.2fs", t, totalSeconds)
-)
-}
-t += step
-}
-} catch {
-if !Task.isCancelled {
-errorText = error.localizedDescription
-}
-}
-}
-private func predictFrame(
-using m: MLModel,
-overrideImages: [String: UIImage],
-header: String? = nil
-) async throws {
-var dict: [String: MLFeatureValue] = [:]
-for s in specs {
-switch s.type {
-case .image:
-guard let cg = overrideImages[s.id]?.normalized().cgImage, let c = s.constraint else {
-throw RunError(message: "Pick an image or video for (s.id)")
-}
-dict[s.id] = try MLFeatureValue(cgImage: cg, constraint: c, options: nil)
-case .string: dict[s.id] = MLFeatureValue(string: texts[s.id] ?? "")
-case .double: dict[s.id] = MLFeatureValue(double: Double(texts[s.id] ?? "") ?? 0)
-case .int64: dict[s.id] = MLFeatureValue(int64: Int64(texts[s.id] ?? "") ?? 0)
-default: throw RunError(message: "Input (s.id) has an unsupported type")
-}
-}
-let provider = try MLDictionaryFeatureProvider(dictionary: dict)
-let t = Date()
-let out = try await m.prediction(from: provider)
-let ms = Date().timeIntervalSince(t) * 1000
-var lines: [String] = []
-if let header { lines.append(header) }
-for name in out.featureNames.sorted() {
-guard let v = out.featureValue(for: name) else { continue }
-switch v.type {
-case .string: lines.append("(name): (v.stringValue)")
-case .int64: lines.append("(name): (v.int64Value)")
-case .double: lines.append("(name): (v.doubleValue)")
-case .dictionary:
-let top = v.dictionaryValue.sorted { $0.value.doubleValue > $1.value.doubleValue }.prefix(5)
-lines.append("(name):")
-for (k, p) in top { lines.append("  (k): (String(format: "%.3f", p.doubleValue))") }
-case .multiArray:
-if let a = v.multiArrayValue {
-let n = min(a.count, 8)
-let head = (0..<n).map { String(format: "%.4g", a[$0].doubleValue) }.joined(separator: ", ")
-lines.append("(name): shape (a.shape.map(.intValue)) [(head)(a.count > n ? ", …" : "")]")
-}
-case .image:
-if let buf = v.imageBufferValue {
-let ci = CIImage(cvPixelBuffer: buf)
-if let cg = ciContext.createCGImage(ci, from: ci.extent) { outImage = UIImage(cgImage: cg) }
-lines.append("(name): image")
-}
-default: lines.append("(name): unsupported output type")
-}
-}
-lines.append(String(format: "— %.1f ms", ms))
-output = lines.joined(separator: "\n")
-}
+        busy = true; errorText = ""; output = ""; outImage = nil
+        defer { busy = false }
+
+        do {
+            let asset = AVURLAsset(url: url)
+            let duration = try await asset.load(.duration)
+            let totalSeconds = CMTimeGetSeconds(duration)
+            let step = 1.0 / fps
+
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+
+            var t: Double = 0
+            while t <= totalSeconds {
+                if Task.isCancelled { break }
+                let cmTime = CMTime(seconds: t, preferredTimescale: 600)
+                if let (cgImage, _) = try? await generator.image(at: cmTime) {
+                    let frameUI = UIImage(cgImage: cgImage)
+                    images[videoKey] = frameUI
+                    var frameInputs = images
+                    frameInputs[videoKey] = frameUI
+                    try await predictFrame(
+                        using: m,
+                        overrideImages: frameInputs,
+                        header: String(format: "Timestamp: %.2fs / %.2fs", t, totalSeconds)
+                    )
+                }
+                t += step
+            }
+        } catch {
+            if !Task.isCancelled {
+                errorText = error.localizedDescription
+            }
+        }
+    }
+
+    private func predictFrame(
+        using m: MLModel,
+        overrideImages: [String: UIImage],
+        header: String? = nil
+    ) async throws {
+        var dict: [String: MLFeatureValue] = [:]
+        for s in specs {
+            switch s.type {
+            case .image:
+                guard let cg = overrideImages[s.id]?.normalized().cgImage, let c = s.constraint else {
+                    throw RunError(message: "Pick an image or video for \(s.id)")
+                }
+                dict[s.id] = try MLFeatureValue(cgImage: cg, constraint: c, options: nil)
+            case .string: dict[s.id] = MLFeatureValue(string: texts[s.id] ?? "")
+            case .double: dict[s.id] = MLFeatureValue(double: Double(texts[s.id] ?? "") ?? 0)
+            case .int64: dict[s.id] = MLFeatureValue(int64: Int64(texts[s.id] ?? "") ?? 0)
+            default: throw RunError(message: "Input \(s.id) has an unsupported type")
+            }
+        }
+
+        let provider = try MLDictionaryFeatureProvider(dictionary: dict)
+        let t = Date()
+        let out = try await m.prediction(from: provider)
+        let ms = Date().timeIntervalSince(t) * 1000
+
+        var lines: [String] = []
+        if let header { lines.append(header) }
+
+        for name in out.featureNames.sorted() {
+            guard let v = out.featureValue(for: name) else { continue }
+            switch v.type {
+            case .string: lines.append("\(name): \(v.stringValue)")
+            case .int64: lines.append("\(name): \(v.int64Value)")
+            case .double: lines.append("\(name): \(v.doubleValue)")
+            case .dictionary:
+                let top = v.dictionaryValue.sorted { $0.value.doubleValue > $1.value.doubleValue }.prefix(5)
+                lines.append("\(name):")
+                for (k, p) in top { lines.append("  \(k): \(String(format: "%.3f", p.doubleValue))") }
+            case .multiArray:
+                if let a = v.multiArrayValue {
+                    let n = min(a.count, 8)
+                    let head = (0..<n).map { String(format: "%.4g", a[$0].doubleValue) }.joined(separator: ", ")
+                    lines.append("\(name): shape \(a.shape.map(\.intValue)) [\(head)\(a.count > n ? ", …" : "")]")
+                }
+            case .image:
+                if let buf = v.imageBufferValue {
+                    let ci = CIImage(cvPixelBuffer: buf)
+                    if let cg = ciContext.createCGImage(ci, from: ci.extent) { outImage = UIImage(cgImage: cg) }
+                    lines.append("\(name): image")
+                }
+            default: lines.append("\(name): unsupported output type")
+            }
+        }
+        lines.append(String(format: "— %.1f ms", ms))
+        output = lines.joined(separator: "\n")
+    }
 }
