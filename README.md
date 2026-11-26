@@ -1,18 +1,18 @@
-# Coremeleon
+Coremeleon
 
 SwiftUI app that imports any Core ML model (.mlmodel / .mlpackage / .mlmodelc), builds an input form from the
 model's own description (image, text, number inputs), runs it, and shows outputs. You can switch compute units
 (Neural Engine / GPU / CPU) and see load + inference time.
 
-## Build from Ubuntu (no Mac needed)
+   Build from Ubuntu:
 1. Create a GitHub repo and push this folder:
    `git init && git add -A && git commit -m init && git branch -M main`
-   `git remote add origin <your-repo-url> && git push -u origin main`
+   `git remote add origin https://github.com/Gliitchd00d/coremeleon-ios/ && git push -u origin main`
 2. GitHub > Actions > "Build IPA" runs on a free macOS runner. When it's green, download the
    `Coremeleon-ipa` artifact and unzip it to get `Coremeleon.ipa`.
-   (If the build fails, open the log and send me the error.)
+   (If the build fails, idk try asking a random ai)
 
-## Install on the iPhone 16 Pro from Ubuntu
+Install from Ubuntu:
 - iPhone: Settings > Privacy & Security > Developer Mode > On (restarts the phone).
 - Use a Linux sideloader such as Dadoum's Sideloader or iloader (both support Linux). Plug in via USB, sign in
   with an Apple ID (a spare one is recommended), and install the .ipa.
